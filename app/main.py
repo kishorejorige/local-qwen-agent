@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -7,11 +10,15 @@ from app.tools import list_files, read_file, write_file, safe_command
 
 app = FastAPI(
     title="Local Qwen Agent",
-    version="1.4.1",
+    version="1.5.1",
 )
 
 
 MAX_TOOL_ROUNDS = 5
+MAX_MEMORY_MESSAGES = 20
+
+MEMORY_DIR = Path(__file__).resolve().parent.parent / "memory"
+MEMORY_FILE = MEMORY_DIR / "conversation.json"
 
 
 TOOLS = [
@@ -133,8 +140,14 @@ class ChatRequest(BaseModel):
 SYSTEM_PROMPT = (
     "You are a local AI agent operating inside a safe workspace. "
     "You can only access files inside the workspace. "
-    "Use the available tools whenever you need information about files. "
-    "Never invent file contents. "
+    "Use the available tools whenever you need actual workspace "
+    "information. "
+    "Never invent files, file contents, command results, or other "
+    "workspace facts. "
+    "If the user gives you information directly, treat it as information "
+    "provided by the user. "
+    "For requests such as 'remember this', do not search the workspace "
+    "unless the user explicitly asks you to do so. "
     "Always treat tool results as authoritative information. "
     "When a tool returns information, use the actual returned information "
     "in your reasoning and in any files you create. "
@@ -154,6 +167,79 @@ SYSTEM_PROMPT = (
     "complete before giving the final answer. "
     "When the task is complete, provide a concise final answer."
 )
+
+
+def clean_message(message: dict) -> dict:
+    """Keep only message fields needed for conversation memory."""
+
+    cleaned = {
+        "role": message.get("role", ""),
+    }
+
+    if "content" in message:
+        cleaned["content"] = message.get("content")
+
+    if "tool_calls" in message:
+        cleaned["tool_calls"] = message["tool_calls"]
+
+    if "name" in message:
+        cleaned["name"] = message["name"]
+
+    return cleaned
+
+
+def load_memory() -> list[dict]:
+    """Load recent conversation messages from local memory."""
+
+    if not MEMORY_FILE.exists():
+        return []
+
+    try:
+        data = json.loads(
+            MEMORY_FILE.read_text(encoding="utf-8")
+        )
+
+        if not isinstance(data, list):
+            return []
+
+        cleaned = []
+
+        for message in data:
+            if isinstance(message, dict):
+                cleaned.append(clean_message(message))
+
+        return cleaned[-MAX_MEMORY_MESSAGES:]
+
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_memory(messages: list[dict]) -> None:
+    """Save only useful conversation messages."""
+
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+    cleaned_messages = [
+        clean_message(message)
+        for message in messages
+        if isinstance(message, dict)
+        and message.get("role") in {
+            "user",
+            "assistant",
+            "tool",
+        }
+    ]
+
+    recent_messages = cleaned_messages[-MAX_MEMORY_MESSAGES:]
+
+    MEMORY_FILE.write_text(
+        json.dumps(
+            recent_messages,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 async def execute_tool(name: str, arguments: dict) -> str:
@@ -179,9 +265,11 @@ async def execute_tool(name: str, arguments: dict) -> str:
 async def root():
     return {
         "name": "Local Qwen Agent",
-        "version": "1.4.1",
+        "version": "1.5.1",
         "model": "qwen3:1.7b",
         "max_tool_rounds": MAX_TOOL_ROUNDS,
+        "max_memory_messages": MAX_MEMORY_MESSAGES,
+        "memory_file": "memory/conversation.json",
         "tools": [
             "list_files",
             "read_file",
@@ -193,11 +281,14 @@ async def root():
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
+    memory = load_memory()
+
     messages = [
         {
             "role": "system",
             "content": SYSTEM_PROMPT,
         },
+        *memory,
         {
             "role": "user",
             "content": request.message,
@@ -213,10 +304,15 @@ async def chat_endpoint(request: ChatRequest):
         tool_calls = assistant_message.get("tool_calls", [])
 
         if not tool_calls:
+            messages.append(assistant_message)
+
+            save_memory(messages[1:])
+
             return {
                 "response": assistant_message.get("content", ""),
                 "tool_calls": tool_calls_log,
                 "rounds": round_number,
+                "memory_messages": len(load_memory()),
             }
 
         messages.append(assistant_message)
@@ -245,6 +341,8 @@ async def chat_endpoint(request: ChatRequest):
                 }
             )
 
+    save_memory(messages[1:])
+
     return {
         "response": (
             "The task reached the maximum tool-call limit "
@@ -252,4 +350,5 @@ async def chat_endpoint(request: ChatRequest):
         ),
         "tool_calls": tool_calls_log,
         "rounds": MAX_TOOL_ROUNDS,
+        "memory_messages": len(load_memory()),
     }
