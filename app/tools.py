@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 
 
 WORKSPACE = Path(__file__).resolve().parent.parent / "workspace"
@@ -8,6 +10,11 @@ def safe_path(path: str) -> Path:
     """Resolve a path and make sure it stays inside workspace."""
 
     workspace = WORKSPACE.resolve()
+
+    # Treat these as the workspace root.
+    if path in ("", ".", "/", "\\"):
+        return workspace
+
     target = (workspace / path).resolve()
 
     try:
@@ -64,3 +71,57 @@ def read_file(path: str) -> str:
         return f"Cannot read as UTF-8 text: {path}"
     except Exception as exc:
         return f"Error reading file: {exc}"
+
+
+SAFE_COMMANDS = {
+    "python_version": [sys.executable, "--version"],
+    "git_version": ["git", "--version"],
+    "git_status": ["git", "status", "--short", "--branch"],
+    "git_log": ["git", "log", "-5", "--oneline"],
+}
+
+
+def safe_command(command: str) -> str:
+    """
+    Execute one predefined read-only command.
+
+    Arbitrary shell commands are not accepted.
+    The command always runs inside the workspace.
+    """
+
+    if command not in SAFE_COMMANDS:
+        allowed = ", ".join(SAFE_COMMANDS.keys())
+        return (
+            f"Command '{command}' is not allowed. "
+            f"Allowed commands: {allowed}"
+        )
+
+    args = SAFE_COMMANDS[command]
+
+    try:
+        result = subprocess.run(
+            args,
+            cwd=WORKSPACE,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "Command timed out after 15 seconds."
+    except FileNotFoundError as exc:
+        return f"Command executable not found: {exc}"
+    except Exception as exc:
+        return f"Error running command: {exc}"
+
+    output = result.stdout.strip()
+
+    if result.stderr.strip():
+        if output:
+            output += "\n"
+        output += result.stderr.strip()
+
+    if not output:
+        output = "(command returned no output)"
+
+    return f"Exit code: {result.returncode}\n{output}"
