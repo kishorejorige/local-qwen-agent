@@ -72,6 +72,24 @@ def read_file(path: str) -> str:
     except Exception as exc:
         return f"Error reading file: {exc}"
 
+def write_file(path: str, content: str) -> str:
+    """Create or overwrite a UTF-8 text file inside the workspace."""
+
+    try:
+        target = safe_path(path)
+    except ValueError as exc:
+        return str(exc)
+
+    if target.exists() and target.is_dir():
+        return f"Cannot write to a directory: {path}"
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"File written successfully: {path}"
+    except Exception as exc:
+        return f"Error writing file: {exc}"
+
 
 SAFE_COMMANDS = {
     "python_version": [sys.executable, "--version"],

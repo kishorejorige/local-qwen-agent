@@ -2,12 +2,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from app.ollama import chat
-from app.tools import list_files, read_file, safe_command
+from app.tools import list_files, read_file, write_file, safe_command
 
 
 app = FastAPI(
     title="Local Qwen Agent",
-    version="1.2.0",
+    version="1.3.0",
 )
 
 
@@ -59,6 +59,35 @@ TOOLS = [
             },
         },
     },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": (
+                "Create or overwrite a UTF-8 text file inside the workspace. "
+                "Only relative workspace paths are allowed. "
+                "Never write outside the workspace."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Relative path for the file inside the workspace."
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Complete UTF-8 text content to write.",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+
     {
         "type": "function",
         "function": {
@@ -99,8 +128,11 @@ SYSTEM_PROMPT = (
     "Never invent file contents. "
     "If a requested file is outside the workspace, explain that access "
     "is denied. "
+    "You may create or overwrite text files only inside the workspace "
+    "using write_file. "
     "For commands, use safe_command only for its predefined read-only "
-    "operations. Never invent or request arbitrary shell commands."
+    "operations. "
+    "Never invent or request arbitrary shell commands."
 )
 
 
@@ -110,7 +142,13 @@ async def execute_tool(name: str, arguments: dict) -> str:
 
     if name == "read_file":
         return read_file(arguments["path"])
-
+    
+    if name == "write_file":
+        return write_file(
+            arguments["path"], 
+            arguments["content"],
+        )
+    
     if name == "safe_command":
         return safe_command(arguments["command"])
 
@@ -121,11 +159,12 @@ async def execute_tool(name: str, arguments: dict) -> str:
 async def root():
     return {
         "name": "Local Qwen Agent",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "model": "qwen3:1.7b",
         "tools": [
             "list_files",
             "read_file",
+            "write_file",
             "safe_command",
         ],
     }
