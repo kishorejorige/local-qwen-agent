@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Local Qwen Agent",
-    version="1.7.2",
+    version="1.8.0",
 )
 
 
@@ -326,11 +326,43 @@ def _duration_ms(started_at: float) -> int:
     return round((time.perf_counter() - started_at) * 1000)
 
 
+def _write_audit(
+    request_id: str,
+    timestamp: str,
+    started_at: float,
+    status: str,
+    rounds: int,
+    tool_calls_log: list[dict],
+    error: str | None = None,
+) -> None:
+    """Record a sanitized audit record for a request."""
+    save_audit_record(
+        {
+            "request_id": request_id,
+            "timestamp": timestamp,
+            "model": "qwen3:1.7b",
+            "status": status,
+            "duration_ms": _duration_ms(started_at),
+            "rounds": rounds,
+            "tool_calls": [
+                {
+                    "round": call["round"],
+                    "tool": call["tool"],
+                }
+                for call in tool_calls_log
+                if isinstance(call, dict) and "round" in call and "tool" in call
+            ],
+            "error": error,
+        }
+    )
+
+
+
 @app.get("/")
 async def root():
     return {
         "name": "Local Qwen Agent",
-        "version": "1.7.2",
+        "version": "1.8.0",
         "model": "qwen3:1.7b",
         "max_tool_rounds": MAX_TOOL_ROUNDS,
         "max_memory_messages": MAX_MEMORY_MESSAGES,
@@ -349,153 +381,200 @@ async def chat_endpoint(request: ChatRequest):
     request_id = create_request_id()
     started_at = time.perf_counter()
     timestamp = utc_timestamp()
-
-    memory = load_memory()
-
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        },
-        *memory,
-        {
-            "role": "user",
-            "content": request.message,
-        },
-    ]
-
+    round_number = 1
     tool_calls_log = []
 
-    for round_number in range(1, MAX_TOOL_ROUNDS + 1):
-        response = await chat(messages, TOOLS)
+    try:
+        memory = load_memory()
 
-        if isinstance(response, dict) and "error" in response:
-            payload = {
-                "error": response["error"],
-                "message": response["message"],
-            }
-            status_code = 503
-            if response["error"] == "model_unavailable":
-                status_code = 404
-            elif response["error"] == "invalid_ollama_response":
-                status_code = 502
-            return JSONResponse(status_code=status_code, content=payload)
+        messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            *memory,
+            {
+                "role": "user",
+                "content": request.message,
+            },
+        ]
 
-        assistant_message = response.get("message")
+        for round_number in range(1, MAX_TOOL_ROUNDS + 1):
+            response = await chat(messages, TOOLS)
 
-        if not isinstance(assistant_message, dict):
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "error": "invalid_ollama_response",
-                    "message": "Ollama returned an invalid assistant message.",
-                },
-            )
-
-        tool_calls = assistant_message.get("tool_calls", [])
-
-        if not tool_calls:
-            messages.append(assistant_message)
-            save_memory(messages[1:])
-
-            save_audit_record(
-                {
-                    "request_id": request_id,
-                    "timestamp": timestamp,
-                    "model": "qwen3:1.7b",
-                    "status": "success",
-                    "duration_ms": _duration_ms(started_at),
-                    "rounds": round_number,
-                    "tool_calls": [
-                        {
-                            "round": call["round"],
-                            "tool": call["tool"],
-                        }
-                        for call in tool_calls_log
-                    ],
-                    "error": None,
+            if isinstance(response, dict) and "error" in response:
+                _write_audit(
+                    request_id=request_id,
+                    timestamp=timestamp,
+                    started_at=started_at,
+                    status="error",
+                    rounds=round_number,
+                    tool_calls_log=tool_calls_log,
+                    error=response["error"],
+                )
+                payload = {
+                    "error": response["error"],
+                    "message": response["message"],
                 }
-            )
+                status_code = 503
+                if response["error"] == "model_unavailable":
+                    status_code = 404
+                elif response["error"] == "invalid_ollama_response":
+                    status_code = 502
+                return JSONResponse(status_code=status_code, content=payload)
 
-            return {
-                "response": assistant_message.get("content", ""),
-                "tool_calls": tool_calls_log,
-                "rounds": round_number,
-                "memory_messages": len(load_memory()),
-            }
+            assistant_message = response.get("message")
 
-        messages.append(assistant_message)
+            if not isinstance(assistant_message, dict):
+                _write_audit(
+                    request_id=request_id,
+                    timestamp=timestamp,
+                    started_at=started_at,
+                    status="error",
+                    rounds=round_number,
+                    tool_calls_log=tool_calls_log,
+                    error="invalid_ollama_response",
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": "invalid_ollama_response",
+                        "message": "Ollama returned an invalid assistant message.",
+                    },
+                )
 
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                result = "Tool error: invalid tool call structure."
-                tool_calls_log.append(
+            tool_calls = assistant_message.get("tool_calls", [])
+
+            if not tool_calls:
+                messages.append(assistant_message)
+                save_memory(messages[1:])
+
+                save_audit_record(
                     {
-                        "round": round_number,
-                        "tool": "unknown",
-                        "arguments": {},
-                        "result": result,
+                        "request_id": request_id,
+                        "timestamp": timestamp,
+                        "model": "qwen3:1.7b",
+                        "status": "success",
+                        "duration_ms": _duration_ms(started_at),
+                        "rounds": round_number,
+                        "tool_calls": [
+                            {
+                                "round": call["round"],
+                                "tool": call["tool"],
+                            }
+                            for call in tool_calls_log
+                        ],
+                        "error": None,
                     }
                 )
-                messages.append({"role": "tool", "content": result})
-                continue
 
-            function = tool_call.get("function")
-            if not isinstance(function, dict):
-                result = "Tool error: invalid tool call structure."
+                return {
+                    "response": assistant_message.get("content", ""),
+                    "tool_calls": tool_calls_log,
+                    "rounds": round_number,
+                    "memory_messages": len(load_memory()),
+                }
+
+            messages.append(assistant_message)
+
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    result = "Tool error: invalid tool call structure."
+                    tool_calls_log.append(
+                        {
+                            "round": round_number,
+                            "tool": "unknown",
+                            "arguments": {},
+                            "result": result,
+                        }
+                    )
+                    messages.append({"role": "tool", "content": result})
+                    continue
+
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    result = "Tool error: invalid tool call structure."
+                    tool_calls_log.append(
+                        {
+                            "round": round_number,
+                            "tool": "unknown",
+                            "arguments": {},
+                            "result": result,
+                        }
+                    )
+                    messages.append({"role": "tool", "content": result})
+                    continue
+
+                name = function.get("name")
+                arguments = function.get("arguments", {})
+
+                if not isinstance(name, str):
+                    result = "Tool error: invalid tool name."
+                    tool_calls_log.append(
+                        {
+                            "round": round_number,
+                            "tool": "unknown",
+                            "arguments": arguments,
+                            "result": result,
+                        }
+                    )
+                    messages.append({"role": "tool", "content": result})
+                    continue
+
+                result = await execute_tool(name, arguments)
+
                 tool_calls_log.append(
                     {
                         "round": round_number,
-                        "tool": "unknown",
-                        "arguments": {},
-                        "result": result,
-                    }
-                )
-                messages.append({"role": "tool", "content": result})
-                continue
-
-            name = function.get("name")
-            arguments = function.get("arguments", {})
-
-            if not isinstance(name, str):
-                result = "Tool error: invalid tool name."
-                tool_calls_log.append(
-                    {
-                        "round": round_number,
-                        "tool": "unknown",
+                        "tool": name,
                         "arguments": arguments,
                         "result": result,
                     }
                 )
-                messages.append({"role": "tool", "content": result})
-                continue
 
-            result = await execute_tool(name, arguments)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": result,
+                    }
+                )
 
-            tool_calls_log.append(
-                {
-                    "round": round_number,
-                    "tool": name,
-                    "arguments": arguments,
-                    "result": result,
-                }
-            )
+        save_memory(messages[1:])
 
-            messages.append(
-                {
-                    "role": "tool",
-                    "content": result,
-                }
-            )
+        _write_audit(
+            request_id=request_id,
+            timestamp=timestamp,
+            started_at=started_at,
+            status="error",
+            rounds=MAX_TOOL_ROUNDS,
+            tool_calls_log=tool_calls_log,
+            error="max_tool_rounds_exceeded",
+        )
 
-    save_memory(messages[1:])
-
-    return {
-        "response": (
-            "The task reached the maximum tool-call limit "
-            f"of {MAX_TOOL_ROUNDS} rounds."
-        ),
-        "tool_calls": tool_calls_log,
-        "rounds": MAX_TOOL_ROUNDS,
-        "memory_messages": len(load_memory()),
-    }
+        return {
+            "response": (
+                "The task reached the maximum tool-call limit "
+                f"of {MAX_TOOL_ROUNDS} rounds."
+            ),
+            "tool_calls": tool_calls_log,
+            "rounds": MAX_TOOL_ROUNDS,
+            "memory_messages": len(load_memory()),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Unexpected error during chat processing: %s", exc)
+        _write_audit(
+            request_id=request_id,
+            timestamp=timestamp,
+            started_at=started_at,
+            status="error",
+            rounds=round_number,
+            tool_calls_log=tool_calls_log,
+            error="unexpected_error",
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "unexpected_error",
+                "message": "An unexpected error occurred. Please try again.",
+            },
+        )

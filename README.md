@@ -5,7 +5,7 @@ A local-first AI agent built with Python, FastAPI, and Ollama. The project runs 
 ## Project status
 
 - Project name: Local Qwen Agent
-- Current version: 1.7.2
+- Current version: 1.8.0
 - Model: qwen3:1.7b
 - Framework: FastAPI
 - Local model runtime: Ollama
@@ -25,6 +25,7 @@ This project implements a small local agent with:
 - a short-term local conversation memory
 - read-only safe diagnostic commands
 - resilient handling for Ollama failures, malformed responses, and tool errors
+- request tracking and failure audit logging for complete observability
 
 It does not execute arbitrary shell commands and does not allow access outside the workspace.
 
@@ -48,7 +49,8 @@ local-qwen-agent/
 |   `-- test.py
 |-- tests/
 |   |-- test_v16_reliability.py
-|   `-- test_v17_audit.py
+|   |-- test_v17_audit.py
+|   `-- test_v18_failure_audit.py
 |-- .gitignore
 |-- README.md
 `-- .venv/
@@ -60,7 +62,7 @@ local-qwen-agent/
 
 ### Audit file
 
-V1.7 audit data is written at runtime to:
+Audit data is written at runtime to:
 
 ```text
 audit/
@@ -72,25 +74,36 @@ The audit file contains JSONL records created while the app runs. It is runtime-
 ### Audit record fields
 
 - `request_id` - unique request identifier
-- `timestamp` - UTC request timestamp
-- `model` - configured Ollama model
-- `status` - current request status
-- `duration_ms` - total request duration
-- `rounds` - number of agent rounds
-- `tool_calls` - tool names and rounds only
-- `error` - error information when applicable
+- `timestamp` - UTC request timestamp in ISO 8601 format
+- `model` - configured Ollama model name (`qwen3:1.7b`)
+- `status` - request outcome status (`success` or `error`)
+- `duration_ms` - total request processing duration in milliseconds
+- `rounds` - number of agent rounds executed
+- `tool_calls` - array of tool calls containing `round` and `tool` name only
+- `error` - standardized error category string for failed requests, or `null` for successful requests
 
-V1.7.2 currently writes a success audit record for successful `/chat` requests. Failure auditing is not yet implemented.
+### Standardized error categories
 
-Example JSONL record:
+When a request encounters an error, the `error` field contains one of the following machine-readable categories:
+
+- `ollama_unavailable` - local Ollama server is unreachable or connection refused
+- `ollama_timeout` - Ollama API request timed out
+- `model_unavailable` - configured model is not found in Ollama
+- `invalid_ollama_response` - Ollama returned an invalid or malformed response payload
+- `max_tool_rounds_exceeded` - task reached maximum allowed tool-call rounds without producing a final answer
+- `unexpected_error` - uncaught application exception during request processing
+
+### Example JSONL audit records
+
+Successful request:
 
 ```json
 {
-  "request_id": "req-example",
+  "request_id": "req-example-success",
   "timestamp": "2026-10-01T13:12:20+00:00",
   "model": "qwen3:1.7b",
   "status": "success",
-  "duration_ms": 81565,
+  "duration_ms": 1520,
   "rounds": 2,
   "tool_calls": [
     {
@@ -102,15 +115,35 @@ Example JSONL record:
 }
 ```
 
-### Audit privacy and security
+Failed request (e.g. Ollama outage):
 
-The V1.7.2 success audit record intentionally does not store:
+```json
+{
+  "request_id": "req-example-failure",
+  "timestamp": "2026-10-01T13:15:00+00:00",
+  "model": "qwen3:1.7b",
+  "status": "error",
+  "duration_ms": 12,
+  "rounds": 1,
+  "tool_calls": [],
+  "error": "ollama_unavailable"
+}
+```
 
-- the full user message
-- full tool arguments
-- full tool results
+### Audit privacy, security, and resiliency
 
-Only the minimal metadata needed for observability is persisted.
+Audit records intentionally do **NOT** store:
+
+- full user prompts or messages
+- tool arguments or parameters
+- tool execution outputs or file contents
+- model reasoning / thinking content
+- raw exception messages or stack traces
+- raw Ollama request or response payloads
+
+Only high-level, sanitized operational metadata is stored for observability.
+
+Furthermore, audit logging is strictly **non-fatal**. If writing to `audit.jsonl` fails (e.g. due to file permissions or disk errors), the failure is logged safely as a warning and the application continues serving client requests without interruption.
 
 ## Requirements
 
@@ -290,6 +323,16 @@ Version 1.6.0 adds operational safety around the local LLM and the agent loop:
 
 ## Development history
 
+### V1.8.0 - Failure Audit & Error Observability
+
+- failure audit tracking for Ollama outages, timeouts, model missing, and invalid payloads
+- failure audit tracking for max-tool-rounds exhaustion limit
+- standardized HTTP 500 error boundary for unexpected application exceptions
+- standardized machine-readable error categories (`ollama_unavailable`, `ollama_timeout`, `model_unavailable`, `invalid_ollama_response`, `max_tool_rounds_exceeded`, `unexpected_error`)
+- privacy-preserving audit records for failure states (no prompt, tool arg, result, or traceback leakage)
+- non-fatal failure audit writing
+- comprehensive automated failure audit test suite (27 total tests)
+
 ### V1.7 - Agent Observability & Audit Trail
 
 #### V1.7.1 - Audit Infrastructure
@@ -346,16 +389,16 @@ Added local conversation memory.
 
 ## Validation
 
-The V1.7.2 implementation has been validated with:
+The V1.8.0 implementation has been validated with:
 
 ```text
-19 tests passed
+27 tests passed
 Ruff: all checks passed
 Python compileall: passed
 Real /chat smoke tests: passed
 ```
 
-The test suite includes reliability tests and audit tracking tests.
+The test suite includes reliability tests, audit tracking tests, and failure audit tests.
 
 ## Notes
 
