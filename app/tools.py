@@ -1,7 +1,6 @@
-from pathlib import Path
 import subprocess
 import sys
-
+from pathlib import Path
 
 WORKSPACE = Path(__file__).resolve().parent.parent / "workspace"
 
@@ -69,8 +68,9 @@ def read_file(path: str) -> str:
         return target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return f"Cannot read as UTF-8 text: {path}"
-    except Exception as exc:
+    except OSError as exc:
         return f"Error reading file: {exc}"
+
 
 def write_file(path: str, content: str) -> str:
     """Create or overwrite a UTF-8 text file inside the workspace."""
@@ -87,7 +87,7 @@ def write_file(path: str, content: str) -> str:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"File written successfully: {path}"
-    except Exception as exc:
+    except OSError as exc:
         return f"Error writing file: {exc}"
 
 
@@ -124,12 +124,13 @@ def safe_command(command: str) -> str:
             text=True,
             timeout=15,
             shell=False,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return "Command timed out after 15 seconds."
     except FileNotFoundError as exc:
         return f"Command executable not found: {exc}"
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         return f"Error running command: {exc}"
 
     output = result.stdout.strip()

@@ -1,16 +1,20 @@
 import json
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.ollama import chat
-from app.tools import list_files, read_file, write_file, safe_command
+from app.tools import list_files, read_file, safe_command, write_file
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(
     title="Local Qwen Agent",
-    version="1.5.1",
+    version="1.6.0",
 )
 
 
@@ -198,74 +202,128 @@ def load_memory() -> list[dict]:
         data = json.loads(
             MEMORY_FILE.read_text(encoding="utf-8")
         )
-
-        if not isinstance(data, list):
-            return []
-
-        cleaned = []
-
-        for message in data:
-            if isinstance(message, dict):
-                cleaned.append(clean_message(message))
-
-        return cleaned[-MAX_MEMORY_MESSAGES:]
-
-    except (OSError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Conversation memory is unreadable or corrupted: %s", exc)
         return []
+
+    if not isinstance(data, list):
+        logger.warning("Conversation memory has an invalid top-level structure.")
+        return []
+
+    cleaned = []
+
+    for message in data:
+        if isinstance(message, dict):
+            cleaned.append(clean_message(message))
+        else:
+            logger.warning("Ignoring malformed conversation memory entry: %r", message)
+
+    return cleaned[-MAX_MEMORY_MESSAGES:]
 
 
 def save_memory(messages: list[dict]) -> None:
     """Save only useful conversation messages."""
 
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-    cleaned_messages = [
-        clean_message(message)
-        for message in messages
-        if isinstance(message, dict)
-        and message.get("role") in {
-            "user",
-            "assistant",
-            "tool",
-        }
-    ]
+        cleaned_messages = [
+            clean_message(message)
+            for message in messages
+            if isinstance(message, dict)
+            and message.get("role") in {
+                "user",
+                "assistant",
+                "tool",
+            }
+        ]
 
-    recent_messages = cleaned_messages[-MAX_MEMORY_MESSAGES:]
+        recent_messages = cleaned_messages[-MAX_MEMORY_MESSAGES:]
 
-    MEMORY_FILE.write_text(
-        json.dumps(
-            recent_messages,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+        MEMORY_FILE.write_text(
+            json.dumps(
+                recent_messages,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Unable to persist conversation memory: %s", exc)
+
+
+def _tool_result_to_error(result: str) -> str:
+    if isinstance(result, str) and any(
+        marker in result
+        for marker in (
+            "Access denied",
+            "Path does not exist",
+            "File does not exist",
+            "Not a file",
+            "Not a directory",
+            "Cannot write to a directory",
+            "Command '",
+            "Command timed out",
+            "Command executable not found",
+            "Error running command",
+            "Error reading file",
+            "Error writing file",
+            "unknown tool",
+        )
+    ):
+        return f"Tool error: {result}"
+    return result
 
 
 async def execute_tool(name: str, arguments: dict) -> str:
-    if name == "list_files":
-        return list_files(arguments.get("path", "."))
+    if not isinstance(arguments, dict):
+        return "Tool error: invalid tool arguments."
 
-    if name == "read_file":
-        return read_file(arguments["path"])
+    try:
+        if name == "list_files":
+            path = arguments.get("path", ".")
+            if not isinstance(path, str):
+                return "Tool error: invalid arguments for list_files: 'path' must be a string."
+            return _tool_result_to_error(list_files(path))
 
-    if name == "write_file":
-        return write_file(
-            arguments["path"],
-            arguments["content"],
-        )
+        if name == "read_file":
+            if "path" not in arguments or not isinstance(arguments["path"], str):
+                return "Tool error: invalid arguments for read_file: missing or invalid 'path'."
+            return _tool_result_to_error(read_file(arguments["path"]))
 
-    if name == "safe_command":
-        return safe_command(arguments["command"])
+        if name == "write_file":
+            if (
+                "path" not in arguments
+                or "content" not in arguments
+                or not isinstance(arguments["path"], str)
+                or not isinstance(arguments["content"], str)
+            ):
+                return (
+                    "Tool error: invalid arguments for write_file: "
+                    "'path' and 'content' must be strings."
+                )
+            return _tool_result_to_error(
+                write_file(arguments["path"], arguments["content"])
+            )
 
-    return f"Unknown tool: {name}"
+        if name == "safe_command":
+            if "command" not in arguments or not isinstance(arguments["command"], str):
+                return (
+                    "Tool error: invalid arguments for safe_command: "
+                    "missing or invalid 'command'."
+                )
+            return _tool_result_to_error(safe_command(arguments["command"]))
+
+        return f"Tool error: unknown tool: {name}"
+    except (TypeError, ValueError) as exc:
+        return f"Tool error: {exc}"
 
 
 @app.get("/")
 async def root():
     return {
         "name": "Local Qwen Agent",
-        "version": "1.5.1",
+        "version": "1.6.0",
         "model": "qwen3:1.7b",
         "max_tool_rounds": MAX_TOOL_ROUNDS,
         "max_memory_messages": MAX_MEMORY_MESSAGES,
@@ -299,13 +357,34 @@ async def chat_endpoint(request: ChatRequest):
 
     for round_number in range(1, MAX_TOOL_ROUNDS + 1):
         response = await chat(messages, TOOLS)
-        assistant_message = response["message"]
+
+        if isinstance(response, dict) and "error" in response:
+            payload = {
+                "error": response["error"],
+                "message": response["message"],
+            }
+            status_code = 503
+            if response["error"] == "model_unavailable":
+                status_code = 404
+            elif response["error"] == "invalid_ollama_response":
+                status_code = 502
+            return JSONResponse(status_code=status_code, content=payload)
+
+        assistant_message = response.get("message")
+
+        if not isinstance(assistant_message, dict):
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "invalid_ollama_response",
+                    "message": "Ollama returned an invalid assistant message.",
+                },
+            )
 
         tool_calls = assistant_message.get("tool_calls", [])
 
         if not tool_calls:
             messages.append(assistant_message)
-
             save_memory(messages[1:])
 
             return {
@@ -318,10 +397,48 @@ async def chat_endpoint(request: ChatRequest):
         messages.append(assistant_message)
 
         for tool_call in tool_calls:
-            function = tool_call["function"]
+            if not isinstance(tool_call, dict):
+                result = "Tool error: invalid tool call structure."
+                tool_calls_log.append(
+                    {
+                        "round": round_number,
+                        "tool": "unknown",
+                        "arguments": {},
+                        "result": result,
+                    }
+                )
+                messages.append({"role": "tool", "content": result})
+                continue
 
-            name = function["name"]
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                result = "Tool error: invalid tool call structure."
+                tool_calls_log.append(
+                    {
+                        "round": round_number,
+                        "tool": "unknown",
+                        "arguments": {},
+                        "result": result,
+                    }
+                )
+                messages.append({"role": "tool", "content": result})
+                continue
+
+            name = function.get("name")
             arguments = function.get("arguments", {})
+
+            if not isinstance(name, str):
+                result = "Tool error: invalid tool name."
+                tool_calls_log.append(
+                    {
+                        "round": round_number,
+                        "tool": "unknown",
+                        "arguments": arguments,
+                        "result": result,
+                    }
+                )
+                messages.append({"role": "tool", "content": result})
+                continue
 
             result = await execute_tool(name, arguments)
 

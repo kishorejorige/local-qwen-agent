@@ -5,7 +5,7 @@ A local-first AI agent built with Python, FastAPI, and Ollama. The project runs 
 ## Project status
 
 - Project name: Local Qwen Agent
-- Current version: 1.5.1
+- Current version: 1.6.0
 - Model: qwen3:1.7b
 - Framework: FastAPI
 - Local model runtime: Ollama
@@ -24,6 +24,7 @@ This project implements a small local agent with:
 - a restricted workspace sandbox
 - a short-term local conversation memory
 - read-only safe diagnostic commands
+- resilient handling for Ollama failures, malformed responses, and tool errors
 
 It does not execute arbitrary shell commands and does not allow access outside the workspace.
 
@@ -207,8 +208,27 @@ The current project behavior is intentionally limited:
 - tool outputs are treated as the source of truth
 - the agent stops after the configured tool limit of 5 rounds
 - the model is expected to use actual workspace results instead of inventing information
+- Ollama outages, timeouts, and model-unavailable states return structured JSON errors instead of crashing the server
+- malformed Ollama payloads, invalid tool arguments, and tool failures are converted into safe tool or API responses
+- corrupted or unreadable memory files are ignored gracefully, and memory write failures do not break a successful chat response
+
+## Reliability improvements in V1.6.0
+
+Version 1.6.0 adds operational safety around the local LLM and the agent loop:
+
+- handles Ollama connection failures and timeout errors cleanly
+- detects model-not-found conditions and returns a clear guidance message
+- validates malformed Ollama responses before they are processed
+- prevents crashes from invalid tool calls or tool argument payloads
+- converts tool failures into safe tool results that keep the agent loop running
+- recovers gracefully from corrupted conversation memory files
+- skips memory-write errors without breaking a successful response
+- includes targeted reliability regression tests for these scenarios
 
 ## Development history
+
+### V1.6.0
+Added reliability and error-handling improvements for local Ollama access, tool execution, and conversation memory.
 
 ### V1.0
 Basic local Qwen tool-calling agent.
@@ -230,18 +250,6 @@ Improved tool-result handling and prevented placeholder values in file output.
 
 ### V1.5.1
 Added local conversation memory.
-
-## Roadmap
-
-The following items are planned as reliability improvements for future versions:
-
-- better error handling
-- Ollama and model availability handling
-- tool failure recovery
-- invalid argument handling
-- timeout handling
-- corrupted memory recovery
-- reliability tests
 
 ## Notes
 
