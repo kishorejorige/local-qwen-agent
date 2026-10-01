@@ -1,11 +1,13 @@
 import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.audit import create_request_id, save_audit_record, utc_timestamp
 from app.ollama import chat
 from app.tools import list_files, read_file, safe_command, write_file
 
@@ -319,6 +321,11 @@ async def execute_tool(name: str, arguments: dict) -> str:
         return f"Tool error: {exc}"
 
 
+def _duration_ms(started_at: float) -> int:
+    """Return elapsed request time in milliseconds."""
+    return round((time.perf_counter() - started_at) * 1000)
+
+
 @app.get("/")
 async def root():
     return {
@@ -339,6 +346,10 @@ async def root():
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
+    request_id = create_request_id()
+    started_at = time.perf_counter()
+    timestamp = utc_timestamp()
+
     memory = load_memory()
 
     messages = [
@@ -386,6 +397,25 @@ async def chat_endpoint(request: ChatRequest):
         if not tool_calls:
             messages.append(assistant_message)
             save_memory(messages[1:])
+
+            save_audit_record(
+                {
+                    "request_id": request_id,
+                    "timestamp": timestamp,
+                    "model": "qwen3:1.7b",
+                    "status": "success",
+                    "duration_ms": _duration_ms(started_at),
+                    "rounds": round_number,
+                    "tool_calls": [
+                        {
+                            "round": call["round"],
+                            "tool": call["tool"],
+                        }
+                        for call in tool_calls_log
+                    ],
+                    "error": None,
+                }
+            )
 
             return {
                 "response": assistant_message.get("content", ""),

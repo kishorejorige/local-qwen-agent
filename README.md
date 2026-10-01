@@ -12,8 +12,8 @@ A local-first AI agent built with Python, FastAPI, and Ollama. The project runs 
 - Server URL: http://127.0.0.1:8017
 - Maximum tool rounds: 5
 - Maximum memory messages: 20
-- Memory file: memory/conversation.json
-- Workspace directory: workspace/
+- Memory file: `memory/conversation.json`
+- Workspace directory: `workspace/`
 
 ## Overview
 
@@ -32,23 +32,85 @@ It does not execute arbitrary shell commands and does not allow access outside t
 
 ```text
 local-qwen-agent/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── ollama.py
-│   └── tools.py
-├── memory/
-│   └── conversation.json   # runtime data; ignored by Git
-├── workspace/
-│   ├── hello.txt
-│   ├── notes.txt
-│   └── test.py
-├── .gitignore
-├── README.md
-└── .venv/
+|-- app/
+|   |-- __init__.py
+|   |-- main.py
+|   |-- ollama.py
+|   |-- tools.py
+|   `-- audit.py
+|-- memory/
+|   `-- conversation.json       # runtime data; ignored by Git
+|-- audit/
+|   `-- audit.jsonl             # runtime data; ignored by Git
+|-- workspace/
+|   |-- hello.txt
+|   |-- notes.txt
+|   `-- test.py
+|-- tests/
+|   |-- test_v16_reliability.py
+|   `-- test_v17_audit.py
+|-- .gitignore
+|-- README.md
+`-- .venv/
 ```
 
-> The memory file is runtime data, not source-controlled application logic. It is created and updated while the app runs, and the memory/ directory is ignored by Git.
+> The `memory/` and `audit/` directories contain runtime data and are ignored by Git.
+
+## Request tracking and audit trail
+
+### Audit file
+
+V1.7 audit data is written at runtime to:
+
+```text
+audit/
+`-- audit.jsonl
+```
+
+The audit file contains JSONL records created while the app runs. It is runtime-generated data and the `audit/` directory is ignored by Git.
+
+### Audit record fields
+
+- `request_id` - unique request identifier
+- `timestamp` - UTC request timestamp
+- `model` - configured Ollama model
+- `status` - current request status
+- `duration_ms` - total request duration
+- `rounds` - number of agent rounds
+- `tool_calls` - tool names and rounds only
+- `error` - error information when applicable
+
+V1.7.2 currently writes a success audit record for successful `/chat` requests. Failure auditing is not yet implemented.
+
+Example JSONL record:
+
+```json
+{
+  "request_id": "req-example",
+  "timestamp": "2026-10-01T13:12:20+00:00",
+  "model": "qwen3:1.7b",
+  "status": "success",
+  "duration_ms": 81565,
+  "rounds": 2,
+  "tool_calls": [
+    {
+      "round": 1,
+      "tool": "list_files"
+    }
+  ],
+  "error": null
+}
+```
+
+### Audit privacy and security
+
+The V1.7.2 success audit record intentionally does not store:
+
+- the full user message
+- full tool arguments
+- full tool results
+
+Only the minimal metadata needed for observability is persisted.
 
 ## Requirements
 
@@ -65,20 +127,20 @@ local-qwen-agent/
 
 ## Windows PowerShell setup
 
-### 1) Create the virtual environment
+### 1. Create the virtual environment
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-### 2) Install dependencies
+### 2. Install dependencies
 
 ```powershell
 pip install fastapi uvicorn httpx pydantic
 ```
 
-### 3) Install and test the Ollama model
+### 3. Install and test the Ollama model
 
 Check installed models:
 
@@ -150,14 +212,14 @@ $result | ConvertTo-Json -Depth 20
 
 The agent can use the following tools:
 
-1. list_files
-2. read_file
-3. write_file
-4. safe_command
+1. `list_files`
+2. `read_file`
+3. `write_file`
+4. `safe_command`
 
 ### Workspace sandbox
 
-File access is restricted to the workspace directory:
+File access is restricted to the `workspace/` directory:
 
 ```text
 workspace/
@@ -168,18 +230,18 @@ Rules:
 - Only paths under the workspace are allowed.
 - Only relative paths are accepted.
 - Access outside the workspace is denied.
-- write_file can only create or overwrite files inside the workspace.
+- `write_file` can only create or overwrite files inside the workspace.
 
 This keeps the agent operating inside a controlled sandbox rather than the full filesystem.
 
 ### Safe command restrictions
 
-The safe_command tool only supports the following predefined read-only operations:
+The `safe_command` tool only supports the following predefined read-only operations:
 
-- python_version
-- git_version
-- git_status
-- git_log
+- `python_version`
+- `git_version`
+- `git_status`
+- `git_log`
 
 No arbitrary shell commands are supported. The tool is limited to safe diagnostics only.
 
@@ -196,7 +258,7 @@ Behavior:
 - recent messages are stored locally
 - the last 20 messages are retained
 - memory is short-term runtime state
-- the memory/ directory is ignored by Git
+- the `memory/` directory is ignored by Git
 - the file is not treated as a committed project artifact
 
 ## Current behavior and safety rules
@@ -210,7 +272,8 @@ The current project behavior is intentionally limited:
 - the model is expected to use actual workspace results instead of inventing information
 - Ollama outages, timeouts, and model-unavailable states return structured JSON errors instead of crashing the server
 - malformed Ollama payloads, invalid tool arguments, and tool failures are converted into safe tool or API responses
-- corrupted or unreadable memory files are ignored gracefully, and memory write failures do not break a successful chat response
+- corrupted or unreadable memory files are ignored gracefully
+- memory write failures do not break a successful chat response
 
 ## Reliability improvements in V1.6.0
 
@@ -227,29 +290,72 @@ Version 1.6.0 adds operational safety around the local LLM and the agent loop:
 
 ## Development history
 
+### V1.7 - Agent Observability & Audit Trail
+
+#### V1.7.1 - Audit Infrastructure
+
+- unique request IDs
+- UTC timestamps
+- JSONL audit persistence
+- non-fatal audit writing
+- audit directory excluded from Git
+
+#### V1.7.2 - Request Tracking
+
+- successful `/chat` request tracking
+- request duration in milliseconds
+- model name
+- number of agent rounds
+- tool names and tool-call rounds
+- request status
+- error field
+- privacy-conscious audit records
+- automated audit tracking tests
+
 ### V1.6.0
+
 Added reliability and error-handling improvements for local Ollama access, tool execution, and conversation memory.
 
 ### V1.0
+
 Basic local Qwen tool-calling agent.
 
 ### V1.1
+
 Added sandboxed workspace tools.
 
 ### V1.2
+
 Added safe read-only command execution.
 
 ### V1.3
+
 Added safe workspace file writing.
 
 ### V1.4
+
 Added multi-step tool loops.
 
 ### V1.4.1
+
 Improved tool-result handling and prevented placeholder values in file output.
 
 ### V1.5.1
+
 Added local conversation memory.
+
+## Validation
+
+The V1.7.2 implementation has been validated with:
+
+```text
+19 tests passed
+Ruff: all checks passed
+Python compileall: passed
+Real /chat smoke tests: passed
+```
+
+The test suite includes reliability tests and audit tracking tests.
 
 ## Notes
 

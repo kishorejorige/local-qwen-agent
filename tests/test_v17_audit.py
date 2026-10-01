@@ -1,6 +1,10 @@
 import json
 
-from app import audit
+from fastapi.testclient import TestClient
+
+from app import audit, main
+
+client = TestClient(main.app)
 
 
 def test_create_request_id_is_unique():
@@ -92,3 +96,124 @@ def test_audit_failure_does_not_raise(tmp_path, monkeypatch):
     )
 
     assert result is False
+
+
+def test_chat_success_writes_sanitized_audit_record(tmp_path, monkeypatch):
+    audit_dir = tmp_path / "audit"
+    audit_file = audit_dir / "audit.jsonl"
+    memory_dir = tmp_path / "memory"
+    memory_file = memory_dir / "conversation.json"
+
+    monkeypatch.setattr(audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(audit, "AUDIT_FILE", audit_file)
+    monkeypatch.setattr(main, "MEMORY_DIR", memory_dir)
+    monkeypatch.setattr(main, "MEMORY_FILE", memory_file)
+
+    async def fake_chat(messages, tools=None):
+        return {
+            "message": {
+                "role": "assistant",
+                "content": "Done.",
+                "tool_calls": [],
+            }
+        }
+
+    monkeypatch.setattr(main, "chat", fake_chat)
+
+    response = client.post(
+        "/chat",
+        json={"message": "private user message"},
+    )
+
+    assert response.status_code == 200
+
+    records = audit_file.read_text(encoding="utf-8").splitlines()
+    assert len(records) == 1
+
+    record = json.loads(records[0])
+
+    assert set(record) == {
+        "request_id",
+        "timestamp",
+        "model",
+        "status",
+        "duration_ms",
+        "rounds",
+        "tool_calls",
+        "error",
+    }
+    assert record["request_id"].startswith("req-")
+    assert record["timestamp"].endswith("+00:00")
+    assert record["model"] == "qwen3:1.7b"
+    assert record["status"] == "success"
+    assert isinstance(record["duration_ms"], int)
+    assert record["duration_ms"] >= 0
+    assert record["rounds"] == 1
+    assert record["tool_calls"] == []
+    assert record["error"] is None
+    assert "private user message" not in records[0]
+    assert "arguments" not in record
+    assert "result" not in record
+
+
+def test_chat_list_files_writes_sanitized_tool_audit_record(tmp_path, monkeypatch):
+    audit_dir = tmp_path / "audit"
+    audit_file = audit_dir / "audit.jsonl"
+    memory_dir = tmp_path / "memory"
+    memory_file = memory_dir / "conversation.json"
+
+    monkeypatch.setattr(audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(audit, "AUDIT_FILE", audit_file)
+    monkeypatch.setattr(main, "MEMORY_DIR", memory_dir)
+    monkeypatch.setattr(main, "MEMORY_FILE", memory_file)
+
+    responses = iter(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "list_files",
+                                "arguments": {"path": "."},
+                            }
+                        }
+                    ],
+                }
+            },
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "The files are listed.",
+                    "tool_calls": [],
+                }
+            },
+        ]
+    )
+
+    async def fake_chat(messages, tools=None):
+        return next(responses)
+
+    monkeypatch.setattr(main, "chat", fake_chat)
+
+    response = client.post(
+        "/chat",
+        json={"message": "list the workspace files"},
+    )
+
+    assert response.status_code == 200
+
+    records = audit_file.read_text(encoding="utf-8").splitlines()
+    assert len(records) == 1
+
+    record = json.loads(records[0])
+
+    assert record["status"] == "success"
+    assert record["rounds"] == 2
+    assert record["tool_calls"] == [{"round": 1, "tool": "list_files"}]
+    assert record["error"] is None
+    assert "list the workspace files" not in records[0]
+    assert "arguments" not in record
+    assert "result" not in record
