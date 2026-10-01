@@ -5,7 +5,7 @@ A local-first AI agent built with Python, FastAPI, and Ollama. The project runs 
 ## Project status
 
 - Project name: Local Qwen Agent
-- Current version: 1.6.0
+- Current version: 1.7.2
 - Model: qwen3:1.7b
 - Framework: FastAPI
 - Local model runtime: Ollama

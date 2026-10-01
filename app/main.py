@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Local Qwen Agent",
-    version="1.6.0",
+    version="1.7.2",
 )
 
 
@@ -330,7 +330,7 @@ def _duration_ms(started_at: float) -> int:
 async def root():
     return {
         "name": "Local Qwen Agent",
-        "version": "1.6.0",
+        "version": "1.7.2",
         "model": "qwen3:1.7b",
         "max_tool_rounds": MAX_TOOL_ROUNDS,
         "max_memory_messages": MAX_MEMORY_MESSAGES,
